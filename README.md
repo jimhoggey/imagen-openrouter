@@ -20,6 +20,15 @@ Recraft, Krea, Riverflow, Grok Imagine, MAI).
 - A bundled fallback list keeps the app usable if OpenRouter is unreachable
 - A saved model that has since been retired is detected and swapped out
 
+### 🔀 Compare Models Side by Side
+Send one prompt to up to **three models at once** and compare the results in
+the gallery.
+
+- Hit **+** next to any model in the picker to add it to the comparison
+- Each model generates your full image count, in parallel
+- Every image is tagged with the model that produced it
+- Leave the comparison empty for normal single-model generation
+
 ### 📐 Flexible Output Options
 - **Resolution**: 1K, 2K, 4K (Gemini models)
 - **Aspect Ratios**: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2

@@ -319,7 +319,7 @@ body {
 
 
 
-/* ===== Model picker rows ===== */
+/* ===== Model tiers + multi-model comparison ===== */
 .model-option-row {
     display: flex;
     align-items: center;
@@ -362,11 +362,43 @@ body {
     border-color: rgba(0, 0, 0, 0.2);
 }
 
+.model-compare-toggle {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all var(--transition-fast);
+}
 
+.model-compare-toggle:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
 
+.model-compare-toggle.on {
+    background: var(--success);
+    border-color: var(--success);
+    color: #000000;
+}
 
+.model-compare-toggle:disabled {
+    opacity: 0;
+    cursor: default;
+}
 
+.custom-select-option.compared {
+    background: rgba(16, 185, 129, 0.09);
+}
 
+.custom-select-option.compared .model-option-id {
+    color: var(--text-secondary);
+}
 
 /* ===== Model Picker (search + pricing) ===== */
 .model-search-wrap {

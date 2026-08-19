@@ -98,6 +98,9 @@ const state = {
     images: [], // Will be loaded from IndexedDB
     currentImage: null,
     pendingBatches: [], // Track pending generation batches { id, prompt, count, completed, failed }
+    // Extra models to send the same prompt to alongside selectedModel.
+    // Empty = single-model behaviour, unchanged from before.
+    comparisonModels: JSON.parse(localStorage.getItem('imagen_comparison_models') || '[]'),
     availableModels: [] // Image models discovered from OpenRouter (see loadModels)
 };
 
@@ -404,6 +407,62 @@ function formatPricePerImage(pricePerImage) {
     return `≈$${pricePerImage.toFixed(decimals)}/image`;
 }
 
+/** Primary model first, then any comparison models, de-duplicated. */
+function getActiveModelIds() {
+    return [state.selectedModel, ...state.comparisonModels]
+        .filter((id, i, arr) => id && arr.indexOf(id) === i);
+}
+
+const MAX_COMPARISON_MODELS = 2; // primary + 2 = 3 models at once
+
+function persistComparisonModels() {
+    localStorage.setItem('imagen_comparison_models', JSON.stringify(state.comparisonModels));
+}
+
+/** Add/remove a model from the comparison set. */
+function toggleComparisonModel(modelId) {
+    if (modelId === state.selectedModel) return;
+
+    const index = state.comparisonModels.indexOf(modelId);
+    if (index !== -1) {
+        state.comparisonModels.splice(index, 1);
+    } else {
+        if (state.comparisonModels.length >= MAX_COMPARISON_MODELS) {
+            showToast(`You can compare up to ${MAX_COMPARISON_MODELS + 1} models at once`, 'warning');
+            return;
+        }
+        state.comparisonModels.push(modelId);
+    }
+    persistComparisonModels();
+    renderModelOptions(elements.modelSearch ? elements.modelSearch.value : '');
+    updateModelSummary();
+}
+
+/** Drop comparison models that are no longer in the catalogue. */
+function pruneComparisonModels() {
+    const before = state.comparisonModels.length;
+    state.comparisonModels = state.comparisonModels
+        .filter(id => MODEL_CONFIGS[id] && id !== state.selectedModel);
+    if (state.comparisonModels.length !== before) persistComparisonModels();
+}
+
+/** Trigger label reflects how many models the prompt will go to. */
+function updateModelSummary() {
+    const primary = MODEL_CONFIGS[state.selectedModel];
+    if (!primary) return;
+    const extra = state.comparisonModels.length;
+    elements.modelSelectValue.textContent = extra
+        ? `${primary.name} + ${extra} more`
+        : primary.name;
+
+    if (elements.generateBtn) {
+        const total = state.imageCount * getActiveModelIds().length;
+        elements.generateBtn.textContent = extra
+            ? `Generate ${total} across ${extra + 1} models`
+            : 'Generate';
+    }
+}
+
 /** Build the option list in the dropdown from MODEL_CONFIGS. */
 function renderModelOptions(filterText = '') {
     if (!elements.modelOptionsList) return;
@@ -425,12 +484,17 @@ function renderModelOptions(filterText = '') {
         const config = MODEL_CONFIGS[model.id];
         const price = formatPricePerImage(config.pricePerImage);
         const isPrimary = model.id === state.selectedModel;
+        const isCompared = state.comparisonModels.includes(model.id);
 
         return `
-            <div class="custom-select-option${isPrimary ? ' selected' : ''}"
+            <div class="custom-select-option${isPrimary ? ' selected' : ''}${isCompared ? ' compared' : ''}"
                  data-value="${escapeHtml(model.id)}" role="option">
                 <div class="model-option-row">
                     <span class="model-option-name">${escapeHtml(config.name)}</span>
+                    <button type="button" class="model-compare-toggle${isCompared ? ' on' : ''}"
+                        data-compare="${escapeHtml(model.id)}"
+                        title="${isPrimary ? 'Primary model' : (isCompared ? 'Remove from comparison' : 'Also send the prompt to this model')}"
+                        ${isPrimary ? 'disabled' : ''}>${isCompared ? '✓' : '+'}</button>
                 </div>
                 <div class="model-option-row model-option-sub">
                     ${config.releaseLabel ? `<span class="model-date" title="Added to OpenRouter">${escapeHtml(config.releaseLabel)}</span>` : ''}
@@ -452,7 +516,8 @@ function selectModel(modelId, options = {}) {
 
     state.selectedModel = modelId;
     localStorage.setItem('imagen_model', modelId);
-    elements.modelSelectValue.textContent = config.name;
+    pruneComparisonModels();
+    updateModelSummary();
 
     if (options.rerender !== false) {
         renderModelOptions(elements.modelSearch ? elements.modelSearch.value : '');
@@ -489,8 +554,9 @@ async function initModelPicker(forceRefresh = false) {
     ensureValidModelSelection();
     renderModelOptions();
 
+    pruneComparisonModels();
     if (MODEL_CONFIGS[state.selectedModel]) {
-        elements.modelSelectValue.textContent = MODEL_CONFIGS[state.selectedModel].name;
+        updateModelSummary();
     }
 
     if (elements.modelSourceNote) {
@@ -572,6 +638,15 @@ function setupEventListeners() {
     // Custom dropdown - option selection (delegated: options are rebuilt
     // whenever the catalogue loads or the search box is typed in).
     elements.modelOptionsList.addEventListener('click', (e) => {
+        // The "+" button adds the model to the comparison set instead of
+        // making it primary, and leaves the dropdown open.
+        const compareBtn = e.target.closest('.model-compare-toggle');
+        if (compareBtn) {
+            e.stopPropagation();
+            toggleComparisonModel(compareBtn.dataset.compare);
+            return;
+        }
+
         const option = e.target.closest('.custom-select-option');
         if (!option) return;
         selectModel(option.dataset.value);
@@ -634,6 +709,7 @@ function setupEventListeners() {
                 state.imageCount--;
                 elements.imageCount.value = state.imageCount;
                 localStorage.setItem('imagen_count', state.imageCount);
+        updateModelSummary();
             }
         });
     }
@@ -644,6 +720,7 @@ function setupEventListeners() {
                 state.imageCount++;
                 elements.imageCount.value = state.imageCount;
                 localStorage.setItem('imagen_count', state.imageCount);
+        updateModelSummary();
             }
         });
     }
@@ -656,6 +733,7 @@ function setupEventListeners() {
             state.imageCount = val;
             elements.imageCount.value = val;
             localStorage.setItem('imagen_count', state.imageCount);
+        updateModelSummary();
         });
     }
 
@@ -895,47 +973,55 @@ async function generateImages() {
         return;
     }
 
-    const modelConfig = MODEL_CONFIGS[state.selectedModel];
-    if (!modelConfig) {
-        showToast('Selected model is unavailable \u2014 pick another from the list', 'error');
+    // The prompt goes to the primary model plus any comparison models. With
+    // none selected this is a single-entry list and behaves exactly as before.
+    const targetModels = getActiveModelIds().filter(id => MODEL_CONFIGS[id]);
+    if (!targetModels.length) {
+        showToast('Selected model is unavailable — pick another from the list', 'error');
         return;
     }
 
     const currentReferences = state.references.length > 0 ? [...state.references] : [];
-    const currentModel = state.selectedModel;
     const currentSize = state.imageSize;
     const currentQuality = state.imageQuality;
     const currentAspectRatio = state.aspectRatio;
     const imageCount = state.imageCount;
 
-    // Create a batch to track this generation request
-    const batchId = Date.now() + Math.random();
-    const batch = {
-        id: batchId,
-        prompt: prompt,
-        model: currentModel,
-        modelName: modelConfig.name,
-        count: imageCount,
-        completed: 0,
-        failed: 0
-    };
-    state.pendingBatches.push(batch);
+    // One batch per model so each model's placeholders and progress are
+    // tracked separately in the gallery.
+    const batches = targetModels.map(modelId => {
+        const batch = {
+            id: Date.now() + Math.random(),
+            prompt: prompt,
+            model: modelId,
+            modelName: MODEL_CONFIGS[modelId].name,
+            count: imageCount,
+            completed: 0,
+            failed: 0
+        };
+        state.pendingBatches.push(batch);
+        addLoadingPlaceholders(batch, imageCount);
+        return batch;
+    });
 
-    // Add loading placeholders without full re-render
-    addLoadingPlaceholders(batch, imageCount);
+    const totalRequested = imageCount * targetModels.length;
+    showToast(
+        targetModels.length > 1
+            ? `Queued ${totalRequested} image(s) across ${targetModels.length} models`
+            : `Queued ${imageCount} image(s) for generation`,
+        'success'
+    );
 
-    showToast(`Queued ${imageCount} image(s) for generation`, 'success');
-
-    // Generate images and display each one as it completes
-    const generateAndDisplay = async (index) => {
+    const generateAndDisplay = async (batch, index) => {
+        const modelConfig = MODEL_CONFIGS[batch.model];
         try {
-            const result = await generateSingleImage(prompt, currentModel, modelConfig);
+            const result = await generateSingleImage(prompt, batch.model, modelConfig);
             if (result) {
                 const imageData = {
                     id: Date.now() + index + Math.random(),
                     url: result,
                     prompt: prompt,
-                    model: currentModel,
+                    model: batch.model,
                     modelName: modelConfig.name,
                     size: currentSize,
                     quality: currentQuality,
@@ -946,36 +1032,49 @@ async function generateImages() {
                 state.images.unshift(imageData);
                 batch.completed++;
 
-                removeOnePlaceholder(batchId);
+                removeOnePlaceholder(batch.id);
                 prependImageCard(imageData, 0);
 
                 ImagenDB.saveImage(imageData).catch(e => console.error('Failed to save to IndexedDB:', e));
             } else {
                 batch.failed++;
-                removeOnePlaceholder(batchId);
+                removeOnePlaceholder(batch.id);
             }
         } catch (error) {
-            console.error('Failed to generate image:', error);
+            console.error(`Failed to generate image with ${batch.model}:`, error);
             batch.failed++;
-            removeOnePlaceholder(batchId);
+            removeOnePlaceholder(batch.id);
         }
     };
 
-    // Start all generations in parallel, each will render when done
+    // Every model x every image runs concurrently.
     const promises = [];
-    for (let i = 0; i < imageCount; i++) {
-        promises.push(generateAndDisplay(i));
-    }
+    batches.forEach(batch => {
+        for (let i = 0; i < imageCount; i++) {
+            promises.push(generateAndDisplay(batch, i));
+        }
+    });
 
     await Promise.allSettled(promises);
 
-    const batchIndex = state.pendingBatches.findIndex(b => b.id === batchId);
-    if (batchIndex !== -1) {
-        state.pendingBatches.splice(batchIndex, 1);
-    }
+    batches.forEach(batch => {
+        const batchIndex = state.pendingBatches.findIndex(b => b.id === batch.id);
+        if (batchIndex !== -1) state.pendingBatches.splice(batchIndex, 1);
+    });
 
-    if (batch.completed > 0) {
-        showToast(`${batch.completed} image(s) generated!`, 'success');
+    const completed = batches.reduce((sum, b) => sum + b.completed, 0);
+    if (completed > 0) {
+        // Name the models that produced nothing, so a failure in a
+        // multi-model run is not hidden by the models that succeeded.
+        const failedModels = batches
+            .filter(b => b.completed === 0)
+            .map(b => b.modelName);
+        showToast(
+            failedModels.length
+                ? `${completed} image(s) generated — no output from ${failedModels.join(', ')}`
+                : `${completed} image(s) generated!`,
+            failedModels.length ? 'warning' : 'success'
+        );
     } else {
         showToast('Failed to generate images. Check console for details.', 'error');
     }
