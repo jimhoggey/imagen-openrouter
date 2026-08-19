@@ -181,6 +181,7 @@ const ImagenEnhancer = (() => {
         if (t.toLowerCase() === orig.toLowerCase()) return null;
         const origWords = countWords(orig);
         if (origWords < 25 && countWords(t) < origWords) return null;
+        if (countWords(t) < 5) return null;
         return t;
     }
 
@@ -258,7 +259,7 @@ const ImagenEnhancer = (() => {
         if (obj) {
             out = typeof obj[target.id] === 'string'
                 ? obj[target.id]
-                : (Object.values(obj).find(v => typeof v === 'string') || '');
+                : (Object.values(obj).filter(v => typeof v === 'string').sort((a, b) => b.length - a.length)[0] || '');
         }
         return { prompt: validateOutput(out, prompt), cost };
     }

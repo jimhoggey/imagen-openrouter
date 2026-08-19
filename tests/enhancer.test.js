@@ -89,6 +89,14 @@ test('validateOutput allows a detailed prompt to be tightened', () => {
     assert.equal(E.validateOutput(`  ${terse} `, orig), terse);
 });
 
+test('validateOutput rejects a too-short output even for a long, detailed original', () => {
+    const orig = 'A sprawling cyberpunk marketplace at night with dozens of neon signs in Japanese and '
+        + 'Korean, steam rising from food stalls, crowds of shoppers in reflective raincoats, puddles '
+        + 'mirroring the lights above, vendors calling out exact prices loudly to passersby tonight.';
+    assert.equal(E.countWords(orig), 40);
+    assert.equal(E.validateOutput('Understood.', orig), null);
+});
+
 test('defaults', () => {
     assert.equal(E.DEFAULT_REWRITER_MODEL, 'google/gemini-2.5-flash');
     assert.ok(E.REWRITER_PRESETS.some(p => p.id === 'google/gemini-2.5-flash'));
@@ -262,6 +270,26 @@ test('enhancePrompt: a JSON-wrapped plain fallback is unwrapped to prose', async
     const r = await E.enhancePrompt({ ...BASE, fetchImpl });
     assert.equal(fetchImpl.calls.length, 2);
     assert.equal(r.prompts['black-forest-labs/flux.2-pro'], 'Red cube on walnut table, soft light, photoreal.');
+    assert.deepEqual(r.failed, []);
+});
+
+test('enhancePrompt: JSON-wrapped plain fallback with a model id key picks the longest string, not the id', async () => {
+    const fetchImpl = fakeFetch((body, n) => {
+        if (n === 1) {
+            return { choices: [{ message: { content: JSON.stringify({
+                'google/gemini-3.1-flash-image': 'A glossy red cube rests on a walnut table, photorealistic.',
+                'black-forest-labs/flux.2-pro': 'a red cube on a table'
+            }) } }], usage: { cost: 0.0005 } };
+        }
+        // The rewriter answers with JSON containing both the model id and the prose.
+        return { choices: [{ message: { content: JSON.stringify({
+            model: 'black-forest-labs/flux.2-pro',
+            prompt: 'Red cube on a walnut table, soft daylight, photoreal render.'
+        }) } }], usage: { cost: 0.0002 } };
+    });
+    const r = await E.enhancePrompt({ ...BASE, fetchImpl });
+    assert.equal(fetchImpl.calls.length, 2);
+    assert.equal(r.prompts['black-forest-labs/flux.2-pro'], 'Red cube on a walnut table, soft daylight, photoreal render.');
     assert.deepEqual(r.failed, []);
 });
 

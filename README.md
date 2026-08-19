@@ -123,6 +123,7 @@ This is a **100% client-side application**:
 - **API**: OpenRouter for model access + `/api/v1/models` for model discovery
 - **Storage**: IndexedDB for image persistence
 - **Styling**: Custom CSS with CSS variables
+- **Tests**: Node's built-in test runner, no dependencies (`node --test`)
 
 ## 📁 Project Structure
 
@@ -130,6 +131,8 @@ This is a **100% client-side application**:
 imagen/
 ├── src/            # Source code (JS/CSS)
 ├── assets/         # Images and design assets
+├── tests/          # Unit tests (node --test)
+├── docs/           # Design specs and plans
 ├── index.html      # Main entry point
 └── README.md       # Documentation
 ```

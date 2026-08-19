@@ -109,6 +109,7 @@ const state = {
     // Prompt enhancer. enhancedPrompts is null when the review panel is
     // closed; otherwise { [imageModelId]: text } and Generate sends these.
     enhancedPrompts: null,
+    enhanceMode: 'generate',      // 'generate' or 'edit' — from the last enhance result
     enhanceFailed: [],            // image model ids the rewriter could not handle
     enhancePromptSource: '',      // the user prompt the panel was built from
     enhancePanelMeta: '',         // meta line to restore when the panel stops being stale
@@ -534,6 +535,8 @@ function recordEnhanceCost(cost) {
     state.sessionCost.enhanceCalls = (state.sessionCost.enhanceCalls || 0) + 1;
     if (Number.isFinite(cost) && cost > 0) {
         state.sessionCost.total += cost;
+    } else {
+        state.sessionCost.estimated = true;
     }
     persistSessionCost();
     updateSessionCostUI();
@@ -541,6 +544,7 @@ function recordEnhanceCost(cost) {
 
 function clearEnhancedPrompts() {
     state.enhancedPrompts = null;
+    state.enhanceMode = 'generate';
     state.enhanceFailed = [];
     state.enhancePromptSource = '';
     state.enhancePanelMeta = '';
@@ -571,11 +575,12 @@ function renderEnhancePanel() {
     elements.enhanceList.innerHTML = models.map(id => {
         const config = MODEL_CONFIGS[id];
         const profile = ImagenEnhancer.getProfile(id);
+        const range = state.enhanceMode === 'edit' ? { min: 30, max: 80 } : profile;
         const text = state.enhancedPrompts[id];
         const failed = state.enhanceFailed.includes(id);
         const value = text != null ? text : state.enhancePromptSource;
         const words = ImagenEnhancer.countWords(value);
-        const outOfRange = words < profile.min || words > profile.max;
+        const outOfRange = words < range.min || words > range.max;
         const note = failed
             ? 'Couldn\'t enhance — original prompt will be used'
             : (text == null ? 'Not enhanced yet — press ✨ Enhance again or edit by hand' : '');
@@ -585,7 +590,7 @@ function renderEnhancePanel() {
                     <span class="enhance-item-name">${escapeHtml(config.name)}</span>
                     <span class="model-option-id">${escapeHtml(id)}</span>
                     <span class="enhance-item-words${outOfRange ? ' out-of-range' : ''}"
-                          title="Suggested ${profile.min}–${profile.max} words">${words} words</span>
+                          title="Suggested ${range.min}–${range.max} words">${words} words</span>
                     <button type="button" class="enhance-reroll" data-reroll="${escapeHtml(id)}"
                         title="Re-roll this prompt">↺</button>
                 </div>
@@ -608,6 +613,7 @@ async function runEnhance() {
     if (!targetModels.length) { showToast('Select an image model first', 'warning'); return; }
 
     elements.enhanceBtn.classList.add('loading');
+    elements.enhanceBtn.disabled = true;
     elements.enhanceBtn.textContent = 'Enhancing…';
     try {
         const result = await ImagenEnhancer.enhancePrompt({
@@ -619,6 +625,7 @@ async function runEnhance() {
         });
         recordEnhanceCost(result.cost);
         state.enhancedPrompts = result.prompts;
+        state.enhanceMode = result.mode;
         state.enhanceFailed = result.failed;
         state.enhancePromptSource = prompt;
         state.enhancePanelMeta =
@@ -643,6 +650,7 @@ async function runEnhance() {
         showToast(`Enhance failed: ${error.message}`, 'error');
     } finally {
         elements.enhanceBtn.classList.remove('loading');
+        elements.enhanceBtn.disabled = false;
         elements.enhanceBtn.textContent = '✨ Enhance';
     }
 }
@@ -972,11 +980,12 @@ function setupEventListeners() {
         const id = box.dataset.enhanced;
         state.enhancedPrompts[id] = box.value;
         const profile = ImagenEnhancer.getProfile(id);
+        const range = state.enhanceMode === 'edit' ? { min: 30, max: 80 } : profile;
         const words = ImagenEnhancer.countWords(box.value);
         const counter = box.parentElement.querySelector('.enhance-item-words');
         if (counter) {
             counter.textContent = `${words} words`;
-            counter.classList.toggle('out-of-range', words < profile.min || words > profile.max);
+            counter.classList.toggle('out-of-range', words < range.min || words > range.max);
         }
     });
     elements.promptInput.addEventListener('input', markEnhancePanelStale);
@@ -1319,7 +1328,7 @@ async function generateImages() {
     // With the panel open the batches come from its textareas, which were
     // written for enhancePromptSource — not for whatever the box says now.
     // Record that source so each stored prompt/enhancedPrompt pair matches.
-    const panelActive = !!state.enhancedPrompts;
+    const panelActive = !!state.enhancedPrompts && Object.keys(state.enhancedPrompts).length > 0;
     const panelStale = panelActive && prompt !== state.enhancePromptSource;
     const recordedOriginal = panelActive ? state.enhancePromptSource : originalPrompt;
     if (panelStale) {
