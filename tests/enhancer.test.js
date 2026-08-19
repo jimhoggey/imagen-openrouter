@@ -31,6 +31,18 @@ test('buildSystemPrompt (edit) swaps in the editing recipe', () => {
     assert.match(sp, /Preserve intent exactly/);   // rule 1 always present
 });
 
+test('buildSystemPrompt (plain) asks for prose and never mentions the JSON object', () => {
+    const sp = E.buildSystemPrompt([TARGETS[1]], 'generate', 'plain');
+    assert.match(sp, /Return only the prompt text for this single target model\. No JSON, no quotes, no commentary\./);
+    assert.doesNotMatch(sp, /JSON object/);
+    assert.match(sp, /black-forest-labs\/flux\.2-pro \(FLUX\.2 Pro\)/);
+    assert.match(sp, /Preserve intent exactly/);
+});
+
+test('buildSystemPrompt defaults to the JSON format', () => {
+    assert.equal(E.buildSystemPrompt(TARGETS, 'generate'), E.buildSystemPrompt(TARGETS, 'generate', 'json'));
+});
+
 test('buildSchema has exactly one required string property per target', () => {
     const s = E.buildSchema(TARGETS);
     assert.equal(s.type, 'object');
@@ -57,6 +69,24 @@ test('validateOutput strips wrapping quotes and markdown fences', () => {
         'A tabby cat sleeps on a sunlit windowsill.');
     assert.equal(E.validateOutput('```\nA tabby cat sleeps on a sunlit windowsill.\n```', orig),
         'A tabby cat sleeps on a sunlit windowsill.');
+});
+
+test('countWords counts whitespace-separated tokens', () => {
+    assert.equal(E.countWords(''), 0);
+    assert.equal(E.countWords('   '), 0);
+    assert.equal(E.countWords(null), 0);
+    assert.equal(E.countWords('a red cube'), 3);
+    assert.equal(E.countWords('  one\ntwo   three \t four '), 4);
+});
+
+test('validateOutput allows a detailed prompt to be tightened', () => {
+    const orig = 'A sprawling cyberpunk marketplace at night with dozens of neon signs in Japanese and '
+        + 'Korean, steam rising from food stalls, crowds of shoppers in reflective raincoats, '
+        + 'puddles mirroring the lights above';
+    assert.ok(E.countWords(orig) >= 25);
+    const terse = 'Neon-lit night market, steam, reflective raincoats, mirrored puddles, dense crowd, cinematic shot.';
+    assert.equal(E.countWords(terse), 12);
+    assert.equal(E.validateOutput(`  ${terse} `, orig), terse);
 });
 
 test('defaults', () => {
@@ -179,6 +209,7 @@ test('enhancePrompt: unparseable JSON → fallback for all; fallback failure →
     assert.equal(fetchImpl.calls.length, 3);
     assert.deepEqual(r.failed, ['google/gemini-3.1-flash-image']);
     assert.equal(r.prompts['google/gemini-3.1-flash-image'], undefined);
+    assert.deepEqual(r.errors, {});   // fulfilled-but-unusable is not a transport error
     assert.match(r.prompts['black-forest-labs/flux.2-pro'], /walnut/);
 });
 
@@ -212,4 +243,51 @@ test('rerollPrompt: one plain call at temperature 0.7', async () => {
     assert.equal(fetchImpl.calls[0].body.response_format, undefined);
     assert.match(r.prompt, /oak/);
     assert.equal(r.cost, 0.0002);
+});
+
+test('enhancePrompt: a JSON-wrapped plain fallback is unwrapped to prose', async () => {
+    const fetchImpl = fakeFetch((body, n) => {
+        if (n === 1) {
+            return { choices: [{ message: { content: JSON.stringify({
+                'google/gemini-3.1-flash-image': 'A glossy red cube rests on a walnut table, photorealistic.',
+                'black-forest-labs/flux.2-pro': 'a red cube on a table'
+            }) } }], usage: { cost: 0.0005 } };
+        }
+        // The rewriter ignores the plain instruction and answers with JSON anyway.
+        assert.doesNotMatch(body.messages[0].content, /JSON object/);
+        return { choices: [{ message: { content: JSON.stringify({
+            'black-forest-labs/flux.2-pro': 'Red cube on walnut table, soft light, photoreal.'
+        }) } }], usage: { cost: 0.0002 } };
+    });
+    const r = await E.enhancePrompt({ ...BASE, fetchImpl });
+    assert.equal(fetchImpl.calls.length, 2);
+    assert.equal(r.prompts['black-forest-labs/flux.2-pro'], 'Red cube on walnut table, soft light, photoreal.');
+    assert.deepEqual(r.failed, []);
+});
+
+test('enhancePrompt: a throwing fallback is reported in failed and errors', async () => {
+    const fetchImpl = fakeFetch((body, n) => {
+        if (n === 1) {
+            return { choices: [{ message: { content: JSON.stringify({
+                'google/gemini-3.1-flash-image': 'a red cube on a table',
+                'black-forest-labs/flux.2-pro': 'Red cube on a walnut table, soft daylight, photoreal render.'
+            }) } }], usage: { cost: 0.0005 } };
+        }
+        return new Error('429 rate limited');
+    });
+    const warned = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => warned.push(args.join(' '));
+    let r;
+    try {
+        r = await E.enhancePrompt({ ...BASE, fetchImpl });
+    } finally {
+        console.warn = realWarn;
+    }
+    assert.equal(fetchImpl.calls.length, 2);
+    assert.deepEqual(r.failed, ['google/gemini-3.1-flash-image']);
+    assert.match(r.errors['google/gemini-3.1-flash-image'], /429/);
+    assert.match(r.prompts['black-forest-labs/flux.2-pro'], /walnut/);
+    assert.equal(warned.length, 1);
+    assert.match(warned[0], /429/);
 });

@@ -110,12 +110,19 @@ const ImagenEnhancer = (() => {
         'cyan neon, brushed-metal panels"). Plain analytical language; no ' +
         'poetic verbs, no lists, no markdown.\n';
 
+    const CLOSER_JSON =
+        'Return only the JSON object requested, with one key per target model id.';
+    const CLOSER_PLAIN =
+        'Return only the prompt text for this single target model. No JSON, no quotes, no commentary.';
+
     /**
      * Assemble the system prompt for a run.
      * @param {Array<{id:string,name:string}>} targets
      * @param {'generate'|'edit'} mode
+     * @param {'json'|'plain'} [format] 'json' for the structured multi-target
+     *   call, 'plain' for a single-target prose call.
      */
-    function buildSystemPrompt(targets, mode) {
+    function buildSystemPrompt(targets, mode, format = 'json') {
         const rules = mode === 'edit' ? RULES_EDIT : RULES_GENERATE;
         const targetLines = targets.map(t => {
             const p = getProfile(t.id);
@@ -125,7 +132,7 @@ const ImagenEnhancer = (() => {
 
         return RULES_COMMON_HEAD + rules +
             '\nTarget models:\n' + targetLines + '\n\n' +
-            'Return only the JSON object requested, with one key per target model id.';
+            (format === 'plain' ? CLOSER_PLAIN : CLOSER_JSON);
     }
 
     /** Strict JSON schema: one required string per target model id. */
@@ -142,28 +149,40 @@ const ImagenEnhancer = (() => {
         };
     }
 
+    /** Strip a leading ```fence (with optional language) and its closer. */
+    function stripFences(text) {
+        return String(text == null ? '' : text).trim()
+            .replace(/^```[a-z]*\s*/i, '')
+            .replace(/\s*```$/, '')
+            .trim();
+    }
+
+    /** Whitespace-separated token count. */
+    function countWords(s) {
+        const words = String(s == null ? '' : s).trim().match(/\S+/g);
+        return words ? words.length : 0;
+    }
+
     /**
-     * Clean one model's output and reject useless results (empty, echo of
-     * the input, or shorter than the input — a lazy rewrite).
+     * Clean one model's output and reject useless results (empty, or an echo
+     * of the input). A short input must be expanded; a detailed input (25+
+     * words) may legitimately be tightened, which the system prompt asks for.
      * @returns {string|null}
      */
     function validateOutput(text, original) {
         if (typeof text !== 'string') return null;
-        let t = text.trim();
         // Strip ```fences``` and a single pair of wrapping quotes.
-        t = t.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/, '').trim();
+        let t = stripFences(text);
         if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith('“') && t.endsWith('”'))) {
             t = t.slice(1, -1).trim();
         }
         const orig = String(original || '').trim();
         if (!t) return null;
         if (t.toLowerCase() === orig.toLowerCase()) return null;
-        if (t.length < orig.length) return null;
+        const origWords = countWords(orig);
+        if (origWords < 25 && countWords(t) < origWords) return null;
         return t;
     }
-
-    const PLAIN_SUFFIX =
-        '\n\nReturn only the prompt text for this single target model. No JSON, no quotes, no commentary.';
 
     function isPreset(modelId) {
         return String(modelId || '').startsWith('@preset/');
@@ -202,7 +221,7 @@ const ImagenEnhancer = (() => {
 
     function tryParseJsonObject(text) {
         if (typeof text !== 'string') return null;
-        const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+        const cleaned = stripFences(text);
         try {
             const obj = JSON.parse(cleaned);
             return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
@@ -222,7 +241,7 @@ const ImagenEnhancer = (() => {
         const body = {
             model: rewriterModel,
             messages: [
-                { role: 'system', content: buildSystemPrompt([target], mode) + PLAIN_SUFFIX },
+                { role: 'system', content: buildSystemPrompt([target], mode, 'plain') },
                 { role: 'user', content: buildUserContent(prompt, references) }
             ],
             max_tokens: 500
@@ -233,7 +252,15 @@ const ImagenEnhancer = (() => {
             body.reasoning = { effort: 'none' };
         }
         const { text, cost } = await postChat(body, apiKey, fetchImpl);
-        return { prompt: validateOutput(text, prompt), cost };
+        // Some rewriters answer with JSON anyway; unwrap it rather than fail.
+        let out = text;
+        const obj = tryParseJsonObject(out);
+        if (obj) {
+            out = typeof obj[target.id] === 'string'
+                ? obj[target.id]
+                : (Object.values(obj).find(v => typeof v === 'string') || '');
+        }
+        return { prompt: validateOutput(out, prompt), cost };
     }
 
     /**
@@ -241,12 +268,17 @@ const ImagenEnhancer = (() => {
      * Structured single call first; per-model plain calls for anything that
      * comes back missing or unusable. Never throws for a bad rewrite — only
      * for transport / auth errors on the first call.
+     * @returns {Promise<{prompts:Object<string,string>, cost:number|null,
+     *   failed:string[], errors:Object<string,string>, mode:'generate'|'edit'}>}
+     *   `failed` lists every target left without a prompt; `errors` maps only
+     *   those whose fallback call threw to its message (`{}` when none did),
+     *   so a rate limit or auth failure is not silently reported as a refusal.
      */
     async function enhancePrompt({ prompt, references, targetModels, rewriterModel, apiKey, temperature = 0.3, fetchImpl }) {
         const targets = (targetModels || []).filter(t => t && t.id);
         const mode = references && references.length ? 'edit' : 'generate';
         const model = rewriterModel || DEFAULT_REWRITER_MODEL;
-        const result = { prompts: {}, cost: null, failed: [], mode };
+        const result = { prompts: {}, cost: null, failed: [], errors: {}, mode };
         if (!targets.length) return result;
 
         const body = {
@@ -293,6 +325,10 @@ const ImagenEnhancer = (() => {
                 if (o.status === 'fulfilled') {
                     result.cost = sumCost(result.cost, o.value.cost);
                     if (o.value.prompt) { result.prompts[t.id] = o.value.prompt; return; }
+                } else {
+                    const message = o.reason?.message || String(o.reason);
+                    result.errors[t.id] = message;
+                    console.warn(`Enhancer fallback failed for ${t.id}: ${message}`);
                 }
                 result.failed.push(t.id);
             });
@@ -318,6 +354,7 @@ const ImagenEnhancer = (() => {
         buildSystemPrompt,
         buildSchema,
         validateOutput,
+        countWords,
         enhancePrompt,
         rerollPrompt
     };
