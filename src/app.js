@@ -101,7 +101,11 @@ const state = {
     // Extra models to send the same prompt to alongside selectedModel.
     // Empty = single-model behaviour, unchanged from before.
     comparisonModels: JSON.parse(localStorage.getItem('imagen_comparison_models') || '[]'),
-    availableModels: [] // Image models discovered from OpenRouter (see loadModels)
+    availableModels: [], // Image models discovered from OpenRouter (see loadModels)
+    // Running spend since the last reset. `estimated` is set when a provider
+    // did not report a cost and the figure includes a price estimate.
+    sessionCost: JSON.parse(localStorage.getItem('imagen_session_cost') || 'null') ||
+        { total: 0, images: 0, estimated: false, startedAt: new Date().toISOString() }
 };
 
 // ===== Model Configurations =====
@@ -370,6 +374,10 @@ const elements = {
     modelSearch: document.getElementById('modelSearch'),
     modelSourceNote: document.getElementById('modelSourceNote'),
     refreshModels: document.getElementById('refreshModels'),
+    sessionCostTotal: document.getElementById('sessionCostTotal'),
+    sessionCostSub: document.getElementById('sessionCostSub'),
+    sessionCostNext: document.getElementById('sessionCostNext'),
+    resetSessionCost: document.getElementById('resetSessionCost'),
     geminiOptions: document.getElementById('geminiOptions'),
     apiKey: document.getElementById('apiKey'),
     saveApiKey: document.getElementById('saveApiKey'),
@@ -397,6 +405,82 @@ const elements = {
     recreateImage: document.getElementById('recreateImage'),
     downloadImage: document.getElementById('downloadImage')
 };
+
+// ===== Session Cost =====
+/**
+ * Spend is tracked from the exact figure OpenRouter reports back. Sending
+ * `usage: { include: true }` with a generation makes the response carry a
+ * `usage.cost` in USD for that call, so the running total is what was
+ * actually charged rather than a guess.
+ *
+ * If a provider omits the cost, we fall back to the catalogue price estimate
+ * for that model and flag the total as approximate so the UI can say so.
+ */
+function formatCost(amount) {
+    if (!Number.isFinite(amount) || amount <= 0) return '$0.00';
+    if (amount < 0.01) return `$${amount.toFixed(4)}`;
+    return `$${amount.toFixed(2)}`;
+}
+
+function persistSessionCost() {
+    try {
+        localStorage.setItem('imagen_session_cost', JSON.stringify(state.sessionCost));
+    } catch (error) {
+        console.warn('Could not persist session cost:', error);
+    }
+}
+
+/** Add one generation to the running total. */
+function recordGenerationCost(meta, modelConfig) {
+    const reported = meta && Number.isFinite(meta.cost) ? meta.cost : null;
+    if (reported !== null) {
+        state.sessionCost.total += reported;
+    } else {
+        // No cost in the response — fall back to the catalogue estimate.
+        const estimate = modelConfig && Number.isFinite(modelConfig.pricePerImage)
+            ? modelConfig.pricePerImage
+            : 0;
+        state.sessionCost.total += estimate;
+        state.sessionCost.estimated = true;
+    }
+    state.sessionCost.images++;
+    persistSessionCost();
+    updateSessionCostUI();
+}
+
+function resetSessionCost() {
+    state.sessionCost = { total: 0, images: 0, estimated: false, startedAt: new Date().toISOString() };
+    persistSessionCost();
+    updateSessionCostUI();
+}
+
+/** What the next Generate press will cost, at the current settings. */
+function estimateNextRunCost() {
+    const models = getActiveModelIds().filter(id => MODEL_CONFIGS[id]);
+    if (!models.length) return null;
+    const perRun = models.reduce((sum, id) => {
+        const price = MODEL_CONFIGS[id].pricePerImage;
+        return sum + (Number.isFinite(price) ? price : 0);
+    }, 0);
+    const total = perRun * state.imageCount;
+    return total > 0 ? { total, models: models.length } : null;
+}
+
+function updateSessionCostUI() {
+    if (!elements.sessionCostTotal) return;
+
+    const { total, images, estimated } = state.sessionCost;
+    elements.sessionCostTotal.textContent = `${estimated ? '≈' : ''}${formatCost(total)}`;
+    elements.sessionCostSub.textContent = images
+        ? `${images} image${images === 1 ? '' : 's'} this session`
+        : 'No images yet';
+
+    const next = estimateNextRunCost();
+    elements.sessionCostNext.textContent = next
+        ? `Next run ≈${formatCost(next.total)}` +
+          (next.models > 1 ? ` · ${state.imageCount} × ${next.models} models` : '')
+        : '';
+}
 
 // ===== Model Picker =====
 /** Format an estimated per-image price for display. */
@@ -454,6 +538,8 @@ function updateModelSummary() {
     elements.modelSelectValue.textContent = extra
         ? `${primary.name} + ${extra} more`
         : primary.name;
+
+    updateSessionCostUI();
 
     if (elements.generateBtn) {
         const total = state.imageCount * getActiveModelIds().length;
@@ -618,6 +704,8 @@ async function init() {
     // Set up event listeners
     setupEventListeners();
 
+    updateSessionCostUI();
+
     // Initialize UI state
     updateGeminiOptionsVisibility();
 }
@@ -659,6 +747,11 @@ function setupEventListeners() {
     });
     // Keep clicks in the search field from closing the dropdown
     elements.modelSearch.addEventListener('click', (e) => e.stopPropagation());
+
+    elements.resetSessionCost.addEventListener('click', () => {
+        resetSessionCost();
+        showToast('Session cost reset', 'success');
+    });
 
     // Manual catalogue refresh (bypasses the 24h cache)
     elements.refreshModels.addEventListener('click', async (e) => {
@@ -1014,9 +1107,11 @@ async function generateImages() {
 
     const generateAndDisplay = async (batch, index) => {
         const modelConfig = MODEL_CONFIGS[batch.model];
+        const meta = {};
         try {
-            const result = await generateSingleImage(prompt, batch.model, modelConfig);
+            const result = await generateSingleImage(prompt, batch.model, modelConfig, meta);
             if (result) {
+                recordGenerationCost(meta, modelConfig);
                 const imageData = {
                     id: Date.now() + index + Math.random(),
                     url: result,
@@ -1080,7 +1175,7 @@ async function generateImages() {
     }
 }
 
-async function generateSingleImage(prompt, modelId, modelConfig) {
+async function generateSingleImage(prompt, modelId, modelConfig, meta = {}) {
     // Build message content
     const content = [];
 
@@ -1114,7 +1209,9 @@ async function generateSingleImage(prompt, modelId, modelConfig) {
                 content: content.length === 1 ? prompt : content
             }
         ],
-        modalities: modelConfig.modalities
+        modalities: modelConfig.modalities,
+        // Ask OpenRouter to report what this call actually cost.
+        usage: { include: true }
     };
 
     // Add Gemini-specific options
@@ -1147,6 +1244,13 @@ async function generateSingleImage(prompt, modelId, modelConfig) {
     }
 
     const data = await response.json();
+
+    // Reported by OpenRouter when usage accounting is requested. Recorded on
+    // the caller's `meta` object so the many image-extraction return paths
+    // below stay untouched.
+    if (data.usage && Number.isFinite(data.usage.cost)) {
+        meta.cost = data.usage.cost;
+    }
 
     // Extract image from response
     // OpenRouter returns images in different formats depending on the model

@@ -29,6 +29,17 @@ the gallery.
 - Every image is tagged with the model that produced it
 - Leave the comparison empty for normal single-model generation
 
+### 💰 Session Cost
+A running total of what you've spent, taken from the cost OpenRouter reports
+for each generation — not an estimate.
+
+- Exact per-call cost via OpenRouter's usage accounting
+- Falls back to the catalogue price estimate if a provider omits it, and marks
+  the total with `≈` so you know it's approximate
+- Shows what the next run will cost at your current settings, before you press
+  Generate
+- **Reset** to start a new session
+
 ### 📐 Flexible Output Options
 - **Resolution**: 1K, 2K, 4K (Gemini models)
 - **Aspect Ratios**: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2
