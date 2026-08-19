@@ -93,6 +93,17 @@
                 </div>
             </div>
 
+            <!-- Prompt Enhancer -->
+            <div class="config-section">
+                <h3>Prompt Enhancer</h3>
+                <select id="rewriterModel" class="text-input select-input" aria-label="Rewriter model">
+                    <!-- Populated from ImagenEnhancer.REWRITER_PRESETS at runtime -->
+                </select>
+                <input type="text" id="rewriterModelCustom" class="text-input" placeholder="custom id or @preset/slug"
+                    autocomplete="off" spellcheck="false" hidden>
+                <p class="help-text">Rewrites your prompt per model before generating. ≈$0.001 per run.</p>
+            </div>
+
             <!-- Session Cost -->
             <div class="config-section">
                 <h3>Session Cost</h3>
@@ -120,11 +131,23 @@
                     <textarea id="promptInput" placeholder="Describe the image you want to generate..."
                         rows="3"></textarea>
                     <div class="prompt-actions">
+                        <button type="button" class="btn btn-ghost btn-enhance" id="enhanceBtn"
+                            title="Rewrite the prompt for each selected model before generating">✨ Enhance</button>
                         <span class="char-count" id="charCount">0 chars</span>
                         <button type="button" class="btn btn-primary" id="generateBtn">
                             Generate
                         </button>
                     </div>
+                </div>
+
+                <!-- Enhanced prompts review panel (hidden until Enhance succeeds) -->
+                <div class="enhance-panel" id="enhancePanel" hidden>
+                    <div class="enhance-panel-header">
+                        <span class="enhance-panel-title" id="enhancePanelTitle">Enhanced prompts</span>
+                        <span class="enhance-panel-meta" id="enhancePanelMeta"></span>
+                        <button type="button" class="btn btn-ghost btn-small" id="useOriginalBtn">Use original</button>
+                    </div>
+                    <div id="enhanceList"></div>
                 </div>
             </div>
 
@@ -191,6 +214,7 @@
         </div>
     </div>
 
+    <script src="src/enhancer.js"></script>
     <script src="src/app.js"></script>
 </body>
 

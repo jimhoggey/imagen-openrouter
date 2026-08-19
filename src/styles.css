@@ -319,6 +319,146 @@ body {
 
 
 
+/* ===== Prompt Enhancer ===== */
+.btn-enhance {
+    margin-right: auto;
+}
+
+.btn-enhance.loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.btn-small {
+    padding: 4px 10px;
+    font-size: 0.72rem;
+}
+
+.select-input {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+        linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+    background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%;
+    background-size: 5px 5px;
+    background-repeat: no-repeat;
+    padding-right: 32px;
+    margin-bottom: 8px;
+}
+
+.help-text {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+
+.enhance-panel {
+    margin-top: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: 12px 14px;
+}
+
+.enhance-panel.stale {
+    border-style: dashed;
+}
+
+.enhance-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.enhance-panel-title {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+
+.enhance-panel-meta {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    flex: 1;
+}
+
+.enhance-item + .enhance-item {
+    margin-top: 10px;
+}
+
+.enhance-item-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.enhance-item-name {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.enhance-item-words {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+}
+
+.enhance-item-words.out-of-range {
+    color: var(--warning);
+}
+
+.enhance-reroll {
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.75rem;
+    width: 24px;
+    height: 22px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.enhance-reroll:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.enhance-reroll:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.enhance-item textarea {
+    width: 100%;
+    min-height: 64px;
+    resize: vertical;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    padding: 8px 10px;
+    outline: none;
+}
+
+.enhance-item textarea:focus {
+    border-color: var(--accent-secondary);
+}
+
+.enhance-item-note {
+    font-size: 0.72rem;
+    color: var(--warning);
+    margin-top: 4px;
+}
+
 /* ===== Session Cost ===== */
 .cost-box {
     background: var(--bg-tertiary);
