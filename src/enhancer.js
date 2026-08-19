@@ -162,6 +162,153 @@ const ImagenEnhancer = (() => {
         return t;
     }
 
+    const PLAIN_SUFFIX =
+        '\n\nReturn only the prompt text for this single target model. No JSON, no quotes, no commentary.';
+
+    function isPreset(modelId) {
+        return String(modelId || '').startsWith('@preset/');
+    }
+
+    function buildUserContent(prompt, references) {
+        const parts = (references || []).filter(Boolean).map(url => ({
+            type: 'image_url', image_url: { url }
+        }));
+        parts.push({ type: 'text', text: prompt });
+        return parts;
+    }
+
+    async function postChat(body, apiKey, fetchImpl) {
+        const doFetch = fetchImpl || globalThis.fetch;
+        const response = await doFetch(OPENROUTER_CHAT_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                'X-Title': 'Imagen Prompt Enhancer'
+            },
+            body: JSON.stringify(body)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data?.error?.message || `Enhancer API error: ${response.status}`);
+        }
+        const content = data?.choices?.[0]?.message?.content;
+        const text = Array.isArray(content)
+            ? content.map(p => p?.text || '').join('')
+            : (content == null ? '' : String(content));
+        const cost = Number.isFinite(data?.usage?.cost) ? data.usage.cost : null;
+        return { text, cost };
+    }
+
+    function tryParseJsonObject(text) {
+        if (typeof text !== 'string') return null;
+        const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+        try {
+            const obj = JSON.parse(cleaned);
+            return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function sumCost(a, b) {
+        if (a == null && b == null) return null;
+        return (a || 0) + (b || 0);
+    }
+
+    /** One plain-text rewrite for a single target (fallback and re-roll). */
+    async function requestPlain({ prompt, references, target, rewriterModel, apiKey, temperature, fetchImpl }) {
+        const mode = references && references.length ? 'edit' : 'generate';
+        const body = {
+            model: rewriterModel,
+            messages: [
+                { role: 'system', content: buildSystemPrompt([target], mode) + PLAIN_SUFFIX },
+                { role: 'user', content: buildUserContent(prompt, references) }
+            ],
+            max_tokens: 500
+        };
+        if (!isPreset(rewriterModel)) {
+            body.temperature = temperature;
+            body.provider = { require_parameters: true, sort: 'latency' };
+            body.reasoning = { effort: 'none' };
+        }
+        const { text, cost } = await postChat(body, apiKey, fetchImpl);
+        return { prompt: validateOutput(text, prompt), cost };
+    }
+
+    /**
+     * Rewrite `prompt` once per target model.
+     * Structured single call first; per-model plain calls for anything that
+     * comes back missing or unusable. Never throws for a bad rewrite — only
+     * for transport / auth errors on the first call.
+     */
+    async function enhancePrompt({ prompt, references, targetModels, rewriterModel, apiKey, temperature = 0.3, fetchImpl }) {
+        const targets = (targetModels || []).filter(t => t && t.id);
+        const mode = references && references.length ? 'edit' : 'generate';
+        const model = rewriterModel || DEFAULT_REWRITER_MODEL;
+        const result = { prompts: {}, cost: null, failed: [], mode };
+        if (!targets.length) return result;
+
+        const body = {
+            model,
+            messages: [
+                { role: 'system', content: buildSystemPrompt(targets, mode) },
+                { role: 'user', content: buildUserContent(prompt, references) }
+            ],
+            max_tokens: 300 * targets.length + 200
+        };
+        if (!isPreset(model)) {
+            body.temperature = temperature;
+            body.response_format = {
+                type: 'json_schema',
+                json_schema: { name: 'enhanced_prompts', strict: true, schema: buildSchema(targets) }
+            };
+            body.provider = { require_parameters: true, sort: 'latency' };
+            body.reasoning = { effort: 'none' };
+            body.plugins = [{ id: 'response-healing' }];
+        }
+
+        const first = await postChat(body, apiKey, fetchImpl);
+        result.cost = first.cost;
+
+        const parsed = tryParseJsonObject(first.text);
+        if (parsed) {
+            targets.forEach(t => {
+                const clean = validateOutput(parsed[t.id], prompt);
+                if (clean) result.prompts[t.id] = clean;
+            });
+        } else if (isPreset(model)) {
+            // A preset may answer with a single prompt; apply it everywhere.
+            const clean = validateOutput(first.text, prompt);
+            if (clean) targets.forEach(t => { result.prompts[t.id] = clean; });
+        }
+
+        const missing = targets.filter(t => !result.prompts[t.id]);
+        if (missing.length) {
+            const outcomes = await Promise.allSettled(missing.map(target =>
+                requestPlain({ prompt, references, target, rewriterModel: model, apiKey, temperature, fetchImpl })
+            ));
+            outcomes.forEach((o, i) => {
+                const t = missing[i];
+                if (o.status === 'fulfilled') {
+                    result.cost = sumCost(result.cost, o.value.cost);
+                    if (o.value.prompt) { result.prompts[t.id] = o.value.prompt; return; }
+                }
+                result.failed.push(t.id);
+            });
+        }
+        return result;
+    }
+
+    /** Re-roll one target with more variety. */
+    function rerollPrompt({ prompt, references, target, rewriterModel, apiKey, fetchImpl }) {
+        return requestPlain({
+            prompt, references, target,
+            rewriterModel: rewriterModel || DEFAULT_REWRITER_MODEL,
+            apiKey, temperature: 0.7, fetchImpl
+        });
+    }
+
     return {
         OPENROUTER_CHAT_URL,
         DEFAULT_REWRITER_MODEL,
@@ -170,7 +317,9 @@ const ImagenEnhancer = (() => {
         getProfile,
         buildSystemPrompt,
         buildSchema,
-        validateOutput
+        validateOutput,
+        enhancePrompt,
+        rerollPrompt
     };
 })();
 

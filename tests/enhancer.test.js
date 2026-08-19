@@ -63,3 +63,153 @@ test('defaults', () => {
     assert.equal(E.DEFAULT_REWRITER_MODEL, 'google/gemini-2.5-flash');
     assert.ok(E.REWRITER_PRESETS.some(p => p.id === 'google/gemini-2.5-flash'));
 });
+
+function fakeFetch(handler) {
+    const calls = [];
+    const fn = async (url, opts) => {
+        const body = JSON.parse(opts.body);
+        calls.push({ url, headers: opts.headers, body });
+        const out = await handler(body, calls.length);
+        if (out instanceof Error) throw out;
+        return {
+            ok: out.status ? out.status < 400 : true,
+            status: out.status || 200,
+            json: async () => out
+        };
+    };
+    fn.calls = calls;
+    return fn;
+}
+
+const BASE = {
+    prompt: 'a red cube on a table',
+    references: [],
+    targetModels: TARGETS,
+    rewriterModel: 'google/gemini-2.5-flash',
+    apiKey: 'test-key'
+};
+
+test('enhancePrompt: structured request shape and parsed result', async () => {
+    const fetchImpl = fakeFetch(() => ({
+        choices: [{ message: { content: JSON.stringify({
+            'google/gemini-3.1-flash-image': 'A glossy red cube rests on a walnut table under soft window light, photorealistic.',
+            'black-forest-labs/flux.2-pro': 'Red cube on walnut table, soft window light, photoreal.'
+        }) } }],
+        usage: { cost: 0.00061 }
+    }));
+    const r = await E.enhancePrompt({ ...BASE, fetchImpl });
+
+    assert.equal(fetchImpl.calls.length, 1);
+    const { url, headers, body } = fetchImpl.calls[0];
+    assert.equal(url, E.OPENROUTER_CHAT_URL);
+    assert.equal(headers.Authorization, 'Bearer test-key');
+    assert.equal(body.model, 'google/gemini-2.5-flash');
+    assert.equal(body.temperature, 0.3);
+    assert.equal(body.max_tokens, 300 * 2 + 200);
+    assert.equal(body.response_format.type, 'json_schema');
+    assert.equal(body.response_format.json_schema.strict, true);
+    assert.deepEqual(Object.keys(body.response_format.json_schema.schema.properties).sort(),
+        TARGETS.map(t => t.id).sort());
+    assert.deepEqual(body.provider, { require_parameters: true, sort: 'latency' });
+    assert.deepEqual(body.reasoning, { effort: 'none' });
+    assert.deepEqual(body.plugins, [{ id: 'response-healing' }]);
+    assert.equal(body.usage, undefined);
+    assert.equal(body.messages[0].role, 'system');
+    assert.match(body.messages[0].content, /Target models:/);
+    assert.deepEqual(body.messages[1].content, [{ type: 'text', text: 'a red cube on a table' }]);
+
+    assert.equal(r.mode, 'generate');
+    assert.equal(r.cost, 0.00061);
+    assert.deepEqual(r.failed, []);
+    assert.match(r.prompts['black-forest-labs/flux.2-pro'], /walnut/);
+});
+
+test('enhancePrompt: references switch to edit mode and are sent as image parts', async () => {
+    const fetchImpl = fakeFetch(() => ({
+        choices: [{ message: { content: JSON.stringify({
+            'google/gemini-3.1-flash-image': 'Keep the subject and lighting; change the cube to blue.',
+            'black-forest-labs/flux.2-pro': 'Change the cube to blue, keep table and lighting.'
+        }) } }], usage: { cost: 0.001 }
+    }));
+    const refs = ['data:image/png;base64,AAAA', 'data:image/png;base64,BBBB'];
+    const r = await E.enhancePrompt({ ...BASE, prompt: 'make it blue', references: refs, fetchImpl });
+    const body = fetchImpl.calls[0].body;
+    assert.equal(r.mode, 'edit');
+    assert.match(body.messages[0].content, /editing instruction/);
+    assert.deepEqual(body.messages[1].content, [
+        { type: 'image_url', image_url: { url: refs[0] } },
+        { type: 'image_url', image_url: { url: refs[1] } },
+        { type: 'text', text: 'make it blue' }
+    ]);
+});
+
+test('enhancePrompt: missing/invalid keys fall back to one plain call per model', async () => {
+    const fetchImpl = fakeFetch((body, n) => {
+        if (n === 1) {
+            // Structured call: one good, one lazy (echo)
+            return { choices: [{ message: { content: JSON.stringify({
+                'google/gemini-3.1-flash-image': 'A glossy red cube rests on a walnut table, photorealistic.',
+                'black-forest-labs/flux.2-pro': 'a red cube on a table'
+            }) } }], usage: { cost: 0.0005 } };
+        }
+        // Plain fallback for flux
+        assert.equal(body.response_format, undefined);
+        assert.match(body.messages[0].content, /black-forest-labs\/flux\.2-pro/);
+        assert.doesNotMatch(body.messages[0].content, /gemini-3\.1-flash-image/);
+        return { choices: [{ message: { content: 'Red cube on a walnut table, soft daylight, photoreal render.' } }],
+                 usage: { cost: 0.0002 } };
+    });
+    const r = await E.enhancePrompt({ ...BASE, fetchImpl });
+    assert.equal(fetchImpl.calls.length, 2);
+    assert.match(r.prompts['black-forest-labs/flux.2-pro'], /walnut/);
+    assert.deepEqual(r.failed, []);
+    assert.equal(r.cost, 0.0007);
+});
+
+test('enhancePrompt: unparseable JSON → fallback for all; fallback failure → listed in failed', async () => {
+    const fetchImpl = fakeFetch((body, n) => {
+        if (n === 1) return { choices: [{ message: { content: 'not json at all' } }], usage: { cost: 0.0001 } };
+        // only flux gets a usable answer
+        if (body.messages[0].content.includes('flux.2-pro')) {
+            return { choices: [{ message: { content: 'Red cube on a walnut table, soft daylight, photoreal.' } }], usage: { cost: 0.0002 } };
+        }
+        return { choices: [{ message: { content: '' } }], usage: { cost: 0.0001 } };
+    });
+    const r = await E.enhancePrompt({ ...BASE, fetchImpl });
+    assert.equal(fetchImpl.calls.length, 3);
+    assert.deepEqual(r.failed, ['google/gemini-3.1-flash-image']);
+    assert.equal(r.prompts['google/gemini-3.1-flash-image'], undefined);
+    assert.match(r.prompts['black-forest-labs/flux.2-pro'], /walnut/);
+});
+
+test('enhancePrompt: @preset ids send no forcing params and parse leniently', async () => {
+    const fetchImpl = fakeFetch(() => ({
+        choices: [{ message: { content: 'A single prompt for everyone, glossy red cube on walnut.' } }], usage: { cost: 0.0003 }
+    }));
+    const r = await E.enhancePrompt({ ...BASE, rewriterModel: '@preset/my-enhancer', fetchImpl });
+    const body = fetchImpl.calls[0].body;
+    assert.equal(body.model, '@preset/my-enhancer');
+    for (const k of ['response_format', 'provider', 'reasoning', 'plugins', 'temperature']) {
+        assert.equal(body[k], undefined, k);
+    }
+    // Non-JSON preset output is applied to every target
+    assert.equal(r.prompts['google/gemini-3.1-flash-image'], r.prompts['black-forest-labs/flux.2-pro']);
+    assert.match(r.prompts['black-forest-labs/flux.2-pro'], /walnut/);
+});
+
+test('enhancePrompt: HTTP error throws with API message', async () => {
+    const fetchImpl = fakeFetch(() => ({ status: 401, error: { message: 'bad key' } }));
+    await assert.rejects(E.enhancePrompt({ ...BASE, fetchImpl }), /bad key/);
+});
+
+test('rerollPrompt: one plain call at temperature 0.7', async () => {
+    const fetchImpl = fakeFetch(() => ({
+        choices: [{ message: { content: 'A crimson cube on a pale oak table, morning light, photoreal.' } }], usage: { cost: 0.0002 }
+    }));
+    const r = await E.rerollPrompt({ prompt: BASE.prompt, references: [], target: TARGETS[1],
+        rewriterModel: BASE.rewriterModel, apiKey: 'k', fetchImpl });
+    assert.equal(fetchImpl.calls[0].body.temperature, 0.7);
+    assert.equal(fetchImpl.calls[0].body.response_format, undefined);
+    assert.match(r.prompt, /oak/);
+    assert.equal(r.cost, 0.0002);
+});
