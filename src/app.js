@@ -624,6 +624,16 @@ async function runEnhance() {
             apiKey: state.apiKey
         });
         recordEnhanceCost(result.cost);
+
+        // Nothing usable for any model: don't open an empty panel — the
+        // prompt box stays authoritative and Generate behaves as before.
+        if (!Object.keys(result.prompts).length) {
+            clearEnhancedPrompts();
+            const firstErr = Object.values(result.errors || {})[0];
+            showToast(firstErr ? `Enhance failed: ${firstErr}` : 'Enhance returned nothing usable — try again or a different rewriter', 'error');
+            return;
+        }
+
         state.enhancedPrompts = result.prompts;
         state.enhanceMode = result.mode;
         state.enhanceFailed = result.failed;
@@ -684,7 +694,7 @@ async function rerollEnhanced(modelId, button) {
 
 /** Read the (possibly edited) text for a model at Generate time. */
 function getPromptForModel(modelId, fallback) {
-    if (!state.enhancedPrompts) return fallback;
+    if (!state.enhancedPrompts || !Object.keys(state.enhancedPrompts).length) return fallback;
     const box = elements.enhanceList.querySelector(`textarea[data-enhanced="${CSS.escape(modelId)}"]`);
     const text = box ? box.value.trim() : (state.enhancedPrompts[modelId] || '');
     return text || fallback;
