@@ -40,6 +40,20 @@ for each generation — not an estimate.
   Generate
 - **Reset** to start a new session
 
+### ✨ Prompt Enhancer
+Short prompts give mediocre images. **Enhance** sends your prompt (and any
+reference images) to a text LLM on OpenRouter, which rewrites it into one
+detailed prompt **per selected image model**, in that model's preferred style.
+
+- Review and edit each rewritten prompt before anything is generated
+- ↺ re-rolls a single model's prompt; **Use original** drops the rewrite
+- With reference images attached it switches to edit-instruction mode
+- Default rewriter `google/gemini-2.5-flash` (≈$0.001 per run); switch to
+  GPT-4.1 Mini, Claude Haiku/Sonnet, any model id, or an OpenRouter
+  `@preset/` in the sidebar
+- The rewrite rules are adapted from the published Qwen-Image, HunyuanImage
+  and FLUX.2 rewriter prompts, not invented here
+
 ### 📐 Flexible Output Options
 - **Resolution**: 1K, 2K, 4K (Gemini models)
 - **Aspect Ratios**: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2

@@ -105,7 +105,13 @@ const state = {
     // Running spend since the last reset. `estimated` is set when a provider
     // did not report a cost and the figure includes a price estimate.
     sessionCost: JSON.parse(localStorage.getItem('imagen_session_cost') || 'null') ||
-        { total: 0, images: 0, estimated: false, startedAt: new Date().toISOString() }
+        { total: 0, images: 0, estimated: false, startedAt: new Date().toISOString() },
+    // Prompt enhancer. enhancedPrompts is null when the review panel is
+    // closed; otherwise { [imageModelId]: text } and Generate sends these.
+    enhancedPrompts: null,
+    enhanceFailed: [],            // image model ids the rewriter could not handle
+    enhancePromptSource: '',      // the user prompt the panel was built from
+    rewriterModel: localStorage.getItem('imagen_rewriter_model') || ImagenEnhancer.DEFAULT_REWRITER_MODEL
 };
 
 // ===== Model Configurations =====
@@ -378,6 +384,13 @@ const elements = {
     sessionCostSub: document.getElementById('sessionCostSub'),
     sessionCostNext: document.getElementById('sessionCostNext'),
     resetSessionCost: document.getElementById('resetSessionCost'),
+    enhanceBtn: document.getElementById('enhanceBtn'),
+    enhancePanel: document.getElementById('enhancePanel'),
+    enhancePanelMeta: document.getElementById('enhancePanelMeta'),
+    enhanceList: document.getElementById('enhanceList'),
+    useOriginalBtn: document.getElementById('useOriginalBtn'),
+    rewriterModel: document.getElementById('rewriterModel'),
+    rewriterModelCustom: document.getElementById('rewriterModelCustom'),
     geminiOptions: document.getElementById('geminiOptions'),
     apiKey: document.getElementById('apiKey'),
     saveApiKey: document.getElementById('saveApiKey'),
@@ -449,7 +462,10 @@ function recordGenerationCost(meta, modelConfig) {
 }
 
 function resetSessionCost() {
-    state.sessionCost = { total: 0, images: 0, estimated: false, startedAt: new Date().toISOString() };
+    state.sessionCost = {
+        total: 0, images: 0, estimated: false, enhanceCalls: 0,
+        startedAt: new Date().toISOString()
+    };
     persistSessionCost();
     updateSessionCostUI();
 }
@@ -471,15 +487,186 @@ function updateSessionCostUI() {
 
     const { total, images, estimated } = state.sessionCost;
     elements.sessionCostTotal.textContent = `${estimated ? '≈' : ''}${formatCost(total)}`;
+    const enhances = state.sessionCost.enhanceCalls || 0;
     elements.sessionCostSub.textContent = images
-        ? `${images} image${images === 1 ? '' : 's'} this session`
-        : 'No images yet';
+        ? `${images} image${images === 1 ? '' : 's'} this session${enhances ? ' · incl. enhance' : ''}`
+        : (enhances ? `${enhances} enhance call${enhances === 1 ? '' : 's'}, no images yet` : 'No images yet');
 
     const next = estimateNextRunCost();
     elements.sessionCostNext.textContent = next
         ? `Next run ≈${formatCost(next.total)}` +
           (next.models > 1 ? ` · ${state.imageCount} × ${next.models} models` : '')
         : '';
+}
+
+// ===== Prompt Enhancer =====
+const REWRITER_CUSTOM_VALUE = '__custom__';
+
+/** Current rewriter id: a preset from the select, or the custom text field. */
+function getRewriterModel() {
+    return state.rewriterModel || ImagenEnhancer.DEFAULT_REWRITER_MODEL;
+}
+
+function populateRewriterSelect() {
+    if (!elements.rewriterModel) return;
+    const presets = ImagenEnhancer.REWRITER_PRESETS;
+    const isPreset = presets.some(p => p.id === state.rewriterModel);
+    elements.rewriterModel.innerHTML = presets.map(p =>
+        `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`
+    ).join('') + `<option value="${REWRITER_CUSTOM_VALUE}">Custom id / @preset…</option>`;
+    elements.rewriterModel.value = isPreset ? state.rewriterModel : REWRITER_CUSTOM_VALUE;
+    elements.rewriterModelCustom.hidden = isPreset;
+    if (!isPreset) elements.rewriterModelCustom.value = state.rewriterModel;
+}
+
+function setRewriterModel(id) {
+    const clean = String(id || '').trim();
+    if (!clean) return;
+    state.rewriterModel = clean;
+    localStorage.setItem('imagen_rewriter_model', clean);
+}
+
+/** Record rewrite spend into the session cost box. */
+function recordEnhanceCost(cost) {
+    if (!Number.isFinite(cost) || cost <= 0) return;
+    state.sessionCost.total += cost;
+    state.sessionCost.enhanceCalls = (state.sessionCost.enhanceCalls || 0) + 1;
+    persistSessionCost();
+    updateSessionCostUI();
+}
+
+function clearEnhancedPrompts() {
+    state.enhancedPrompts = null;
+    state.enhanceFailed = [];
+    state.enhancePromptSource = '';
+    elements.enhancePanel.hidden = true;
+    elements.enhancePanel.classList.remove('stale');
+    elements.enhanceList.innerHTML = '';
+}
+
+/** The prompt box changed after enhancing: hint, but keep the panel. */
+function markEnhancePanelStale() {
+    if (!state.enhancedPrompts) return;
+    const current = elements.promptInput.value.trim();
+    elements.enhancePanel.classList.toggle('stale', current !== state.enhancePromptSource);
+}
+
+/** One editable box per active image model, pre-filled from state. */
+function renderEnhancePanel() {
+    if (!state.enhancedPrompts) { elements.enhancePanel.hidden = true; return; }
+
+    const models = getActiveModelIds().filter(id => MODEL_CONFIGS[id]);
+    elements.enhanceList.innerHTML = models.map(id => {
+        const config = MODEL_CONFIGS[id];
+        const profile = ImagenEnhancer.getProfile(id);
+        const text = state.enhancedPrompts[id];
+        const failed = state.enhanceFailed.includes(id);
+        const value = text != null ? text : state.enhancePromptSource;
+        const words = ImagenEnhancer.countWords(value);
+        const outOfRange = words < profile.min || words > profile.max;
+        const note = failed
+            ? 'Couldn\'t enhance — original prompt will be used'
+            : (text == null ? 'Not enhanced yet — press ✨ Enhance again or edit by hand' : '');
+        return `
+            <div class="enhance-item" data-model="${escapeHtml(id)}">
+                <div class="enhance-item-head">
+                    <span class="enhance-item-name">${escapeHtml(config.name)}</span>
+                    <span class="model-option-id">${escapeHtml(id)}</span>
+                    <span class="enhance-item-words${outOfRange ? ' out-of-range' : ''}"
+                          title="Suggested ${profile.min}–${profile.max} words">${words} words</span>
+                    <button type="button" class="enhance-reroll" data-reroll="${escapeHtml(id)}"
+                        title="Re-roll this prompt">↺</button>
+                </div>
+                <textarea data-enhanced="${escapeHtml(id)}" rows="3">${escapeHtml(value)}</textarea>
+                ${note ? `<div class="enhance-item-note">${escapeHtml(note)}</div>` : ''}
+            </div>`;
+    }).join('');
+    elements.enhancePanel.hidden = false;
+}
+
+/** Enhance button handler. */
+async function runEnhance() {
+    const prompt = elements.promptInput.value.trim();
+    if (!prompt) { showToast('Please enter a prompt', 'warning'); return; }
+    if (!state.apiKey) { showToast('Please enter your OpenRouter API key', 'error'); return; }
+
+    const targetModels = getActiveModelIds()
+        .filter(id => MODEL_CONFIGS[id])
+        .map(id => ({ id, name: MODEL_CONFIGS[id].name }));
+    if (!targetModels.length) { showToast('Select an image model first', 'warning'); return; }
+
+    elements.enhanceBtn.classList.add('loading');
+    elements.enhanceBtn.textContent = 'Enhancing…';
+    try {
+        const result = await ImagenEnhancer.enhancePrompt({
+            prompt,
+            references: state.references.filter(Boolean),
+            targetModels,
+            rewriterModel: getRewriterModel(),
+            apiKey: state.apiKey
+        });
+        recordEnhanceCost(result.cost);
+        state.enhancedPrompts = result.prompts;
+        state.enhanceFailed = result.failed;
+        state.enhancePromptSource = prompt;
+        elements.enhancePanelMeta.textContent =
+            `${getRewriterModel()} · ${result.mode === 'edit' ? 'edit mode' : 'generate mode'}` +
+            (Number.isFinite(result.cost) ? ` · ${formatCost(result.cost)}` : '');
+        renderEnhancePanel();
+        elements.enhancePanel.classList.remove('stale');
+        if (result.failed.length) {
+            const firstErr = Object.values(result.errors || {})[0];
+            showToast(
+                firstErr
+                    ? `Enhance failed for ${result.failed.length} model(s): ${firstErr}`
+                    : `Couldn't enhance for ${result.failed.length} model(s) — original will be used there`,
+                'warning'
+            );
+        } else {
+            showToast('Prompts enhanced — review, edit, then Generate', 'success');
+        }
+    } catch (error) {
+        console.error('Enhance failed:', error);
+        showToast(`Enhance failed: ${error.message}`, 'error');
+    } finally {
+        elements.enhanceBtn.classList.remove('loading');
+        elements.enhanceBtn.textContent = '✨ Enhance';
+    }
+}
+
+/** ↺ on one model. */
+async function rerollEnhanced(modelId, button) {
+    if (!state.enhancedPrompts || !MODEL_CONFIGS[modelId]) return;
+    button.disabled = true;
+    try {
+        const { prompt: text, cost } = await ImagenEnhancer.rerollPrompt({
+            prompt: state.enhancePromptSource,
+            references: state.references.filter(Boolean),
+            target: { id: modelId, name: MODEL_CONFIGS[modelId].name },
+            rewriterModel: getRewriterModel(),
+            apiKey: state.apiKey
+        });
+        recordEnhanceCost(cost);
+        if (text) {
+            state.enhancedPrompts[modelId] = text;
+            state.enhanceFailed = state.enhanceFailed.filter(id => id !== modelId);
+            renderEnhancePanel();
+        } else {
+            showToast('Re-roll returned nothing usable', 'warning');
+        }
+    } catch (error) {
+        showToast(`Re-roll failed: ${error.message}`, 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+/** Read the (possibly edited) text for a model at Generate time. */
+function getPromptForModel(modelId, fallback) {
+    if (!state.enhancedPrompts) return fallback;
+    const box = elements.enhanceList.querySelector(`textarea[data-enhanced="${CSS.escape(modelId)}"]`);
+    const text = box ? box.value.trim() : (state.enhancedPrompts[modelId] || '');
+    return text || fallback;
 }
 
 // ===== Model Picker =====
@@ -547,6 +734,8 @@ function updateModelSummary() {
             ? `Generate ${total} across ${extra + 1} models`
             : 'Generate';
     }
+
+    renderEnhancePanel();
 }
 
 /** Build the option list in the dropdown from MODEL_CONFIGS. */
@@ -705,6 +894,7 @@ async function init() {
     setupEventListeners();
 
     updateSessionCostUI();
+    populateRewriterSelect();
 
     // Initialize UI state
     updateGeminiOptionsVisibility();
@@ -751,6 +941,44 @@ function setupEventListeners() {
     elements.resetSessionCost.addEventListener('click', () => {
         resetSessionCost();
         showToast('Session cost reset', 'success');
+    });
+
+    // Prompt enhancer
+    elements.enhanceBtn.addEventListener('click', runEnhance);
+    elements.useOriginalBtn.addEventListener('click', () => {
+        clearEnhancedPrompts();
+        showToast('Using original prompt', 'info');
+    });
+    elements.enhanceList.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-reroll]');
+        if (btn) rerollEnhanced(btn.dataset.reroll, btn);
+    });
+    elements.enhanceList.addEventListener('input', (e) => {
+        const box = e.target.closest('textarea[data-enhanced]');
+        if (!box) return;
+        const id = box.dataset.enhanced;
+        state.enhancedPrompts[id] = box.value;
+        const profile = ImagenEnhancer.getProfile(id);
+        const words = ImagenEnhancer.countWords(box.value);
+        const counter = box.parentElement.querySelector('.enhance-item-words');
+        if (counter) {
+            counter.textContent = `${words} words`;
+            counter.classList.toggle('out-of-range', words < profile.min || words > profile.max);
+        }
+    });
+    elements.promptInput.addEventListener('input', markEnhancePanelStale);
+    elements.rewriterModel.addEventListener('change', () => {
+        const v = elements.rewriterModel.value;
+        if (v === REWRITER_CUSTOM_VALUE) {
+            elements.rewriterModelCustom.hidden = false;
+            elements.rewriterModelCustom.focus();
+        } else {
+            elements.rewriterModelCustom.hidden = true;
+            setRewriterModel(v);
+        }
+    });
+    elements.rewriterModelCustom.addEventListener('change', () => {
+        setRewriterModel(elements.rewriterModelCustom.value);
     });
 
     // Manual catalogue refresh (bypasses the 24h cache)
@@ -1074,6 +1302,8 @@ async function generateImages() {
         return;
     }
 
+    const originalPrompt = prompt;
+
     const currentReferences = state.references.length > 0 ? [...state.references] : [];
     const currentSize = state.imageSize;
     const currentQuality = state.imageQuality;
@@ -1085,7 +1315,8 @@ async function generateImages() {
     const batches = targetModels.map(modelId => {
         const batch = {
             id: Date.now() + Math.random(),
-            prompt: prompt,
+            prompt: getPromptForModel(modelId, originalPrompt),
+            originalPrompt: originalPrompt,
             model: modelId,
             modelName: MODEL_CONFIGS[modelId].name,
             count: imageCount,
@@ -1109,13 +1340,15 @@ async function generateImages() {
         const modelConfig = MODEL_CONFIGS[batch.model];
         const meta = {};
         try {
-            const result = await generateSingleImage(prompt, batch.model, modelConfig, meta);
+            const result = await generateSingleImage(batch.prompt, batch.model, modelConfig, meta);
             if (result) {
                 recordGenerationCost(meta, modelConfig);
                 const imageData = {
                     id: Date.now() + index + Math.random(),
                     url: result,
-                    prompt: prompt,
+                    prompt: batch.originalPrompt,
+                    enhancedPrompt: batch.prompt !== batch.originalPrompt ? batch.prompt : null,
+                    rewriterModel: batch.prompt !== batch.originalPrompt ? getRewriterModel() : null,
                     model: batch.model,
                     modelName: modelConfig.name,
                     size: currentSize,
@@ -1679,6 +1912,15 @@ function recreateImageByIndex(index) {
     elements.promptInput.value = image.prompt;
     elements.charCount.textContent = `${image.prompt.length} chars`;
 
+    // Restore the enhanced prompt into the review panel for this model, so
+    // Generate replays what actually produced the image.
+    clearEnhancedPrompts();
+    if (image.enhancedPrompt) {
+        state.enhancedPrompts = { [image.model]: image.enhancedPrompt };
+        state.enhancePromptSource = image.prompt;
+        elements.enhancePanelMeta.textContent = `${image.rewriterModel || 'enhanced'} · restored`;
+    }
+
     // Restore model. If it has since been retired from OpenRouter the current
     // selection is kept rather than silently switching to an unrelated model.
     if (!selectModel(image.model)) {
@@ -1721,6 +1963,8 @@ function openModal(image) {
     elements.modalImage.src = sanitizeImageUrl(image.url);
     elements.modalMetadata.innerHTML = `
         <p><strong>Prompt:</strong> ${escapeHtml(image.prompt)}</p>
+        ${image.enhancedPrompt ? `<p><strong>Enhanced prompt:</strong> ${escapeHtml(image.enhancedPrompt)}</p>
+        <p><strong>Rewriter:</strong> ${escapeHtml(image.rewriterModel || '')}</p>` : ''}
         <p><strong>Model:</strong> ${escapeHtml(image.modelName || image.model)}</p>
         <p><strong>Size/Quality:</strong> ${escapeHtml(image.quality || image.size)}</p>
         <p><strong>Aspect Ratio:</strong> ${escapeHtml(image.aspectRatio)}</p>
@@ -1750,6 +1994,15 @@ function recreateImage() {
     // Restore prompt
     elements.promptInput.value = state.currentImage.prompt;
     elements.charCount.textContent = `${state.currentImage.prompt.length} chars`;
+
+    // Restore the enhanced prompt into the review panel for this model, so
+    // Generate replays what actually produced the image.
+    clearEnhancedPrompts();
+    if (state.currentImage.enhancedPrompt) {
+        state.enhancedPrompts = { [state.currentImage.model]: state.currentImage.enhancedPrompt };
+        state.enhancePromptSource = state.currentImage.prompt;
+        elements.enhancePanelMeta.textContent = `${state.currentImage.rewriterModel || 'enhanced'} · restored`;
+    }
 
     // Restore model. If it has since been retired from OpenRouter the current
     // selection is kept rather than silently switching to an unrelated model.
