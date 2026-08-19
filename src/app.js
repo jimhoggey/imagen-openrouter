@@ -111,6 +111,7 @@ const state = {
     enhancedPrompts: null,
     enhanceFailed: [],            // image model ids the rewriter could not handle
     enhancePromptSource: '',      // the user prompt the panel was built from
+    enhancePanelMeta: '',         // meta line to restore when the panel stops being stale
     rewriterModel: localStorage.getItem('imagen_rewriter_model') || ImagenEnhancer.DEFAULT_REWRITER_MODEL
 };
 
@@ -528,9 +529,12 @@ function setRewriterModel(id) {
 
 /** Record rewrite spend into the session cost box. */
 function recordEnhanceCost(cost) {
-    if (!Number.isFinite(cost) || cost <= 0) return;
-    state.sessionCost.total += cost;
+    // Count every rewrite, even one the provider reported no cost for, so the
+    // session box never hides enhance calls that actually happened.
     state.sessionCost.enhanceCalls = (state.sessionCost.enhanceCalls || 0) + 1;
+    if (Number.isFinite(cost) && cost > 0) {
+        state.sessionCost.total += cost;
+    }
     persistSessionCost();
     updateSessionCostUI();
 }
@@ -539,8 +543,10 @@ function clearEnhancedPrompts() {
     state.enhancedPrompts = null;
     state.enhanceFailed = [];
     state.enhancePromptSource = '';
+    state.enhancePanelMeta = '';
     elements.enhancePanel.hidden = true;
     elements.enhancePanel.classList.remove('stale');
+    elements.enhancePanelMeta.textContent = '';
     elements.enhanceList.innerHTML = '';
 }
 
@@ -548,7 +554,13 @@ function clearEnhancedPrompts() {
 function markEnhancePanelStale() {
     if (!state.enhancedPrompts) return;
     const current = elements.promptInput.value.trim();
-    elements.enhancePanel.classList.toggle('stale', current !== state.enhancePromptSource);
+    const stale = current !== state.enhancePromptSource;
+    elements.enhancePanel.classList.toggle('stale', stale);
+    // Say it in words too: the boxes still hold the earlier prompt's rewrites,
+    // and Generate would send those.
+    elements.enhancePanelMeta.textContent = stale
+        ? 'Prompt changed since enhancing — press ✨ Enhance again, or Use original'
+        : state.enhancePanelMeta;
 }
 
 /** One editable box per active image model, pre-filled from state. */
@@ -609,9 +621,10 @@ async function runEnhance() {
         state.enhancedPrompts = result.prompts;
         state.enhanceFailed = result.failed;
         state.enhancePromptSource = prompt;
-        elements.enhancePanelMeta.textContent =
+        state.enhancePanelMeta =
             `${getRewriterModel()} · ${result.mode === 'edit' ? 'edit mode' : 'generate mode'}` +
             (Number.isFinite(result.cost) ? ` · ${formatCost(result.cost)}` : '');
+        elements.enhancePanelMeta.textContent = state.enhancePanelMeta;
         renderEnhancePanel();
         elements.enhancePanel.classList.remove('stale');
         if (result.failed.length) {
@@ -1303,6 +1316,15 @@ async function generateImages() {
     }
 
     const originalPrompt = prompt;
+    // With the panel open the batches come from its textareas, which were
+    // written for enhancePromptSource — not for whatever the box says now.
+    // Record that source so each stored prompt/enhancedPrompt pair matches.
+    const panelActive = !!state.enhancedPrompts;
+    const panelStale = panelActive && prompt !== state.enhancePromptSource;
+    const recordedOriginal = panelActive ? state.enhancePromptSource : originalPrompt;
+    if (panelStale) {
+        showToast('Generating with the enhanced prompts from your earlier text — press ✨ Enhance to refresh them', 'warning');
+    }
 
     const currentReferences = state.references.length > 0 ? [...state.references] : [];
     const currentSize = state.imageSize;
@@ -1315,8 +1337,8 @@ async function generateImages() {
     const batches = targetModels.map(modelId => {
         const batch = {
             id: Date.now() + Math.random(),
-            prompt: getPromptForModel(modelId, originalPrompt),
-            originalPrompt: originalPrompt,
+            prompt: getPromptForModel(modelId, recordedOriginal),
+            originalPrompt: recordedOriginal,
             model: modelId,
             modelName: MODEL_CONFIGS[modelId].name,
             count: imageCount,
@@ -1918,13 +1940,18 @@ function recreateImageByIndex(index) {
     if (image.enhancedPrompt) {
         state.enhancedPrompts = { [image.model]: image.enhancedPrompt };
         state.enhancePromptSource = image.prompt;
-        elements.enhancePanelMeta.textContent = `${image.rewriterModel || 'enhanced'} · restored`;
+        state.enhancePanelMeta = `${image.rewriterModel || 'enhanced'} · restored`;
+        elements.enhancePanelMeta.textContent = state.enhancePanelMeta;
     }
 
     // Restore model. If it has since been retired from OpenRouter the current
     // selection is kept rather than silently switching to an unrelated model.
     if (!selectModel(image.model)) {
         showToast(`Model "${image.model}" is no longer available — keeping current selection`, 'info');
+        // The restored panel is for a model that is not selected — drop it.
+        clearEnhancedPrompts();
+    } else {
+        renderEnhancePanel();
     }
 
     // Restore quality/size
@@ -2001,13 +2028,18 @@ function recreateImage() {
     if (state.currentImage.enhancedPrompt) {
         state.enhancedPrompts = { [state.currentImage.model]: state.currentImage.enhancedPrompt };
         state.enhancePromptSource = state.currentImage.prompt;
-        elements.enhancePanelMeta.textContent = `${state.currentImage.rewriterModel || 'enhanced'} · restored`;
+        state.enhancePanelMeta = `${state.currentImage.rewriterModel || 'enhanced'} · restored`;
+        elements.enhancePanelMeta.textContent = state.enhancePanelMeta;
     }
 
     // Restore model. If it has since been retired from OpenRouter the current
     // selection is kept rather than silently switching to an unrelated model.
     if (!selectModel(state.currentImage.model)) {
         showToast(`Model "${state.currentImage.model}" is no longer available — keeping current selection`, 'info');
+        // The restored panel is for a model that is not selected — drop it.
+        clearEnhancedPrompts();
+    } else {
+        renderEnhancePanel();
     }
 
     // Restore quality/size
